@@ -1,6 +1,6 @@
-name: astrbot_plugin_YTU_Electricity # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
-display_name: YTU_Electricity # 用于展示的名字，可以是方便人类阅读的名字（需要版本 >= v4.5.0，低版本不会报错，请放心填写）
-desc: AstrBot 插件示例。 # 插件简短描述
-version: v1.1.0 # 插件版本号。格式：v1.1.1 或者 v1.1
-author: YouAWAs936-design # 作者
-repo: https://github.com/youawas936-design/bot_test # 插件的仓库地址
+name: astrbot_plugin_eink_api
+display_name: Eink_Dashboard_API
+desc: 墨水屏数据中台（集成电费/天气/新闻/专注打卡与QQ备忘录）
+version: v8.0.0
+author: YouAWAs936-design
+repo: https://github.com/youawas936-design/bot_test
