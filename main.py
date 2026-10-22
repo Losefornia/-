@@ -13,19 +13,24 @@ from astrbot.api.event import filter, AstrMessageEvent
 
 EXAM_DATE = datetime(2026, 12, 21, tzinfo=ZoneInfo("Asia/Shanghai"))
 TZ = ZoneInfo("Asia/Shanghai")
-MEMO_DB_FILE = "/www/wwwroot/astrbot/data/plugin_data/astrbot_plugin_eink_api/eink_memos.db"
 
-@register("eink_api", "你的名字", "墨水屏看板", "16.0.0")
+# ⚠️【修正】：全部改为 Docker 容器内部的真实路径
+MEMO_DB_FILE = "/AstrBot/data/plugin_data/astrbot_plugin_eink_api/eink_memos.db"
+
+@register("eink_api", "你的名字", "墨水屏看板", "17.0.0")
 class EinkApiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
-        self.fee_db_path = "/www/wwwroot/astrbot/data/plugin_data/astrbot_plugin_dianfei/meters_data.db"
-        self.news_db_path = "/www/wwwroot/astrbot/data/plugin_data/astrbot_plugin_ytunews/news.db"
-        self.study_db_path = "/www/wwwroot/astrbot/data/plugin_data/astrbot_plugin_eink_api/study_data.db"
+        # ⚠️【修正】：全部改为 Docker 容器内部的真实路径
+        self.fee_db_path = "/AstrBot/data/plugin_data/astrbot_plugin_dianfei/meters_data.db"
+        self.news_db_path = "/AstrBot/data/plugin_data/astrbot_plugin_ytunews/news.db"
+        self.study_db_path = "/AstrBot/data/plugin_data/astrbot_plugin_eink_api/study_data.db"
+        
         self.http_client: httpx.AsyncClient | None = None
         self.runner: web.AppRunner | None = None
         self._weather_cache = None
         self._weather_cache_time = None
+        
         self.init_study_db()
         self.init_memo_db()
 
@@ -43,23 +48,20 @@ class EinkApiPlugin(Star):
 
     async def initialize(self):
         self.http_client = httpx.AsyncClient(timeout=10.0)
-        logger.info("✅ 墨水屏全能看板 V16.0 已加载！")
+        logger.info("✅ 墨水屏全能看板 V17.0 (Docker路径修复版) 已加载！")
         
-        # 启动时打印所有表的真实数据情况
+        # 🚨 启动自检
         try:
             with sqlite3.connect(self.fee_db_path, check_same_thread=False) as conn:
                 c = conn.execute("SELECT COUNT(*) FROM meter_records").fetchone()[0]
-                # 打印一条最新的
-                r = conn.execute("SELECT user_addr, balance FROM meter_records ORDER BY id DESC LIMIT 1").fetchone()
-                logger.info(f"🔍 [自检] 服务器电费库总数: {c} 条，最新一条: {r}")
+                logger.info(f"🔍 [自检] 服务器电费库总记录数: 【 {c} 】条")
         except Exception as e:
             logger.error(f"🔍 [自检] 电费库读取失败: {e}")
 
         try:
             with sqlite3.connect(self.news_db_path, check_same_thread=False) as conn:
                 c = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
-                r = conn.execute("SELECT title FROM news ORDER BY id DESC LIMIT 1").fetchone()
-                logger.info(f"🔍 [自检] 服务器新闻库总数: {c} 条，最新一条: {r}")
+                logger.info(f"🔍 [自检] 服务器新闻库总记录数: 【 {c} 】条")
         except Exception as e:
             logger.error(f"🔍 [自检] 新闻库读取失败: {e}")
 
@@ -127,31 +129,25 @@ class EinkApiPlugin(Star):
                 result_data["weather"] = self._weather_cache
         except: pass
 
-        # 3. 查电费 (全库盲抓！)
+        # 3. 查电费 (直接盲抓最新一条)
         try:
             with sqlite3.connect(self.fee_db_path, check_same_thread=False) as conn:
-                # 查全表最新的那一条。如果 balance 是 null，它会直接跳过
                 cursor = conn.execute("SELECT balance FROM meter_records WHERE balance IS NOT NULL ORDER BY id DESC LIMIT 1")
                 row = cursor.fetchone()
                 if row: 
                     result_data["balance"] = float(row[0])
                     logger.info(f"💰 [接口] 成功抓到电费: {row[0]}")
-                else:
-                    logger.warning("💰 [接口] 服务器电费库查不到任何有效数字！")
         except Exception as e:
             logger.error(f"查电费报错: {e}")
 
-        # 4. 查新闻 (全库盲抓！)
+        # 4. 查新闻 (直接盲抓最新两条)
         try:
             with sqlite3.connect(self.news_db_path, check_same_thread=False) as conn:
-                # 只要 title 不为空的
                 cursor = conn.execute("SELECT title FROM news WHERE title IS NOT NULL AND title != '' ORDER BY id DESC LIMIT 2")
                 rows = cursor.fetchall()
                 for r in rows:
                     result_data["news_list"].append({"title": r[0][:22] + ".." if len(r[0]) > 22 else r[0]})
                     logger.info(f"📰 [接口] 成功抓到新闻: {r[0]}")
-                if not rows:
-                    logger.warning("📰 [接口] 服务器新闻库查不到任何有效标题！")
         except Exception as e:
             logger.error(f"查新闻报错: {e}")
 
