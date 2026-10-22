@@ -19,7 +19,10 @@ STUDY_DB_FILE = "/AstrBot/data/plugin_data/astrbot_plugin_eink_api/study_data.db
 FEE_DB_FILE = "/AstrBot/data/plugin_data/astrbot_plugin_dianfei/meters_data.db"
 NEWS_DB_FILE = "/AstrBot/data/plugin_data/astrbot_plugin_ytunews/news.db"
 
-@register("eink_api", "你的名字", "墨水屏全功能看板", "21.0.0")
+# 电费单价（度/元），如果你的电价不是 0.55，请在这里修改
+PRICE_PER_KWH = 0.55
+
+@register("eink_api", "你的名字", "墨水屏全功能看板", "24.0.0")
 class EinkApiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -42,7 +45,7 @@ class EinkApiPlugin(Star):
 
     async def initialize(self):
         self.http_client = httpx.AsyncClient(timeout=10.0)
-        logger.info("✅ 墨水屏全功能看板 V21.0 (锁定N422) 已加载！")
+        logger.info("✅ 墨水屏全功能看板 V24.0 (电量计算版) 已加载！")
         asyncio.create_task(self.start_web_server())
 
     @filter.command("备忘录")
@@ -54,7 +57,7 @@ class EinkApiPlugin(Star):
         with sqlite3.connect(MEMO_DB_FILE, check_same_thread=False) as conn:
             conn.execute("INSERT INTO memos (content, time) VALUES (?, ?)", (msg_text, now_str))
             conn.commit()
-        yield event.plain_result(f"✅ 备忘录已存！墨水屏将全屏显示。\n内容：{msg_text}")
+        yield event.plain_result(f"✅ 备忘录已存！\n内容：{msg_text}")
 
     async def handle_record(self, request):
         try:
@@ -69,13 +72,71 @@ class EinkApiPlugin(Star):
         except Exception as e:
             return web.json_response({"status": "error", "msg": str(e)}, status=500)
 
+    def calc_usage(self, addr):
+        """计算近三天用电量和今日小时均用电"""
+        usage_3d = [0.0, 0.0, 0.0] # 0=今天, 1=昨天, 2=前天
+        hourly_avg = 0.0
+        
+        try:
+            with sqlite3.connect(FEE_DB_FILE, check_same_thread=False) as conn:
+                # 取最近 4 天的所有记录（算差值需要前一天的结尾余额）
+                now = datetime.now()
+                four_days_ago = (now - timedelta(days=4)).strftime("%Y-%m-%d %H:%M:%S")
+                
+                # 模糊匹配你的宿舍（比如 N-422），并且时间在最近4天内
+                cursor = conn.execute(
+                    "SELECT record_time, balance FROM meter_records WHERE user_addr LIKE '%N-422%' AND record_time >= ? ORDER BY record_time ASC",
+                    (four_days_ago,)
+                )
+                rows = cursor.fetchall()
+                
+                if not rows: return usage_3d, hourly_avg
+
+                # 按天分组处理
+                daily_data = {} # {'2026-10-20': [bal1, bal2...], ...}
+                for rt_str, bal in rows:
+                    day_str = rt_str.split(" ")[0]
+                    if day_str not in daily_data:
+                        daily_data[day_str] = []
+                    daily_data[day_str].append(bal)
+
+                # 按日期倒序排，方便取今天、昨天、前天
+                sorted_days = sorted(daily_data.keys(), reverse=True)
+                
+                for i in range(3):
+                    if i < len(sorted_days):
+                        day = sorted_days[i]
+                        bals = daily_data[day]
+                        if len(bals) >= 2:
+                            # 一天内的最大余额减去最小余额，就是当天掉的钱
+                            diff = max(bals) - min(bals)
+                            # 如果是充值了，diff为负，算作0
+                            usage_3d[i] = round(max(0, diff) / PRICE_PER_KWH, 2)
+                            
+                            # 如果是今天（i=0），计算小时均
+                            if i == 0:
+                                # 计算今天数据跨度了几个小时
+                                start_t = datetime.strptime(day + " 00:00:00", "%Y-%m-%d %H:%M:%S")
+                                end_t = now
+                                hours_span = max(1, (end_t - start_t).total_seconds() / 3600)
+                                hourly_avg = round(usage_3d[0] / hours_span, 2)
+                                
+            return usage_3d, hourly_avg
+        except Exception as e:
+            logger.error(f"计算出电量失败: {e}")
+            return usage_3d, hourly_avg
+
     async def handle_all(self, request):
         today = datetime.now(tz=TZ).strftime("%Y-%m-%d")
         days_to_exam = max(0, (EXAM_DATE - datetime.now(tz=TZ)).days)
 
         result_data = {
             "status": "success", "weather": "--", "days_to_exam": days_to_exam,
-            "balance": 0.0, "news_list": [], "subject_times": {"政治":0, "英语":0, "数学":0, "专业课":0, "其他":0},
+            "balance": 0.0, 
+            "usage_3d": [0.0, 0.0, 0.0], # 近三天用电量
+            "hourly_avg": 0.0,           # 今日小时均用电
+            "news_list": [], 
+            "subject_times": {"政治":0, "英语":0, "数学":0, "专业课":0, "其他":0},
             "memos": []
         }
 
@@ -105,17 +166,20 @@ class EinkApiPlugin(Star):
                 result_data["weather"] = self._weather_cache
         except: pass
 
-        # 3. 查电费 (⭐️精准模糊匹配 N422)
+        # 3. 查电费 & 计算
         try:
             with sqlite3.connect(FEE_DB_FILE, check_same_thread=False) as conn:
-                # 使用 LIKE '%N422%' 只要有这三个字符就抓出来！
-                cursor = conn.execute("SELECT user_addr, balance FROM meter_records WHERE user_addr LIKE '%N422%' ORDER BY id DESC LIMIT 1")
+                # 拿最新的余额
+                cursor = conn.execute("SELECT balance FROM meter_records WHERE user_addr LIKE '%N-422%' ORDER BY id DESC LIMIT 1")
                 row = cursor.fetchone()
                 if row: 
-                    result_data["balance"] = float(row[1])
-                    logger.info(f"💰 成功锁定你的宿舍: {row[0]}, 余额: {row[1]}")
-                else:
-                    logger.warning("⚠️ 数据库中找不到包含 N422 的宿舍号！")
+                    result_data["balance"] = float(row[0])
+            
+            # 计算三天用量和小时均量
+            usage_3d, hourly_avg = self.calc_usage("N-422")
+            result_data["usage_3d"] = usage_3d
+            result_data["hourly_avg"] = hourly_avg
+            logger.info(f"📈 用电统计: 3天={usage_3d}, 小时均={hourly_avg}")
         except Exception as e:
             logger.error(f"查电费报错: {e}")
 
