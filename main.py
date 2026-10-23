@@ -27,7 +27,7 @@ CONFIG_DB_FILE = "/AstrBot/data/plugin_data/astrbot_plugin_eink_api/eink_config.
 
 PRICE_PER_KWH = 0.55
 
-@register("eink_api", "你的名字", "墨水屏全功能看板", "34.0.0")
+@register("eink_api", "你的名字", "墨水屏全功能看板", "35.0.0")
 class EinkApiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -64,30 +64,50 @@ class EinkApiPlugin(Star):
         self.http_client = httpx.AsyncClient(timeout=10.0)
         if psutil:
             psutil.cpu_percent(interval=0.1)
-        logger.info("✅ 墨水屏全能看板 V34.0 (QQ联动版) 已加载！")
+        logger.info("✅ 墨水屏全能看板 V35.0 (终极完美版) 已加载！")
         asyncio.create_task(self.start_web_server())
 
     # ================= QQ 专属指令 =================
     
-    # 1. 查专注
+    # 1. 查专注（支持查历史）
     @filter.command("查专注")
     async def qq_check_focus(self, event: AstrMessageEvent):
-        today = datetime.now(tz=TZ).strftime("%Y-%m-%d")
+        parts = event.message_str.split(maxsplit=1)
+        days = 0
+        if len(parts) >= 2 and parts[1].isdigit():
+            days = int(parts[1])
+        
         try:
             with sqlite3.connect(STUDY_DB_FILE, check_same_thread=False) as conn:
-                cursor = conn.execute("SELECT subject, SUM(minutes) FROM focus_records WHERE date=? GROUP BY subject", (today,))
-                rows = cursor.fetchall()
+                if days == 0:
+                    today = datetime.now(tz=TZ).strftime("%Y-%m-%d")
+                    cursor = conn.execute("SELECT subject, SUM(minutes) FROM focus_records WHERE date=? GROUP BY subject", (today,))
+                    rows = cursor.fetchall()
+                    title = f"📊 **今日专注账本** ({today})"
+                else:
+                    start_date = (datetime.now(tz=TZ) - timedelta(days=days)).strftime("%Y-%m-%d")
+                    cursor = conn.execute("SELECT date, SUM(minutes) FROM focus_records WHERE date >= ? GROUP BY date ORDER BY date DESC", (start_date,))
+                    rows = cursor.fetchall()
+                    title = f"📊 **最近 {days} 天专注趋势**"
                 
                 if not rows:
-                    yield event.plain_result("📊 今天还没有专注记录哦，快去刷番茄钟吧！")
+                    yield event.plain_result(f"📊 {title}：暂无专注记录哦，快去刷番茄钟吧！")
                     return
                 
-                total = sum(r[1] for r in rows)
-                msg = f"📊 **今日专注账本** ({today})\n━━━━━━━━━━━━━━━━\n"
-                for sub, mins in rows:
-                    msg += f"📖 {sub}：{mins} 分钟\n"
-                msg += f"━━━━━━━━━━━━━━━━\n"
-                msg += f"⏱️ 总计：{total} 分钟 ({round(total/60, 1)} 小时)"
+                msg = f"{title}\n━━━━━━━━━━━━━━━━\n"
+                
+                if days == 0:
+                    total = sum(r[1] for r in rows)
+                    for sub, mins in rows:
+                        msg += f"📖 {sub}：{mins} 分钟\n"
+                    msg += f"━━━━━━━━━━━━━━━━\n⏱️ 总计：{total} 分钟 ({round(total/60, 1)} 小时)"
+                else:
+                    total_all = 0
+                    for date_str, mins in rows:
+                        total_all += mins
+                        msg += f"📅 {date_str}：{mins} 分钟 ({round(mins/60, 1)}h)\n"
+                    msg += f"━━━━━━━━━━━━━━━━\n⏱️ {days}天总计：{total_all} 分钟 ({round(total_all/60, 1)} 小时)"
+                    
                 yield event.plain_result(msg)
         except Exception as e:
             logger.error(f"查专注失败: {e}")
@@ -249,7 +269,7 @@ class EinkApiPlugin(Star):
                     result_data["news_list"].append({"title": r[0][:22] + ".." if len(r[0]) > 22 else r[0]})
         except: pass
 
-        # 5. 查专注
+        # 5. 查专注（今日总计）
         try:
             total_m = 0
             with sqlite3.connect(STUDY_DB_FILE, check_same_thread=False) as conn:
