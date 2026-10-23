@@ -27,7 +27,7 @@ CONFIG_DB_FILE = "/AstrBot/data/plugin_data/astrbot_plugin_eink_api/eink_config.
 
 PRICE_PER_KWH = 0.55
 
-@register("eink_api", "你的名字", "墨水屏全功能看板", "33.0.0")
+@register("eink_api", "你的名字", "墨水屏全功能看板", "34.0.0")
 class EinkApiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -64,10 +64,36 @@ class EinkApiPlugin(Star):
         self.http_client = httpx.AsyncClient(timeout=10.0)
         if psutil:
             psutil.cpu_percent(interval=0.1)
-        logger.info("✅ 墨水屏全能看板 V33.0 稳定版 已加载！")
+        logger.info("✅ 墨水屏全能看板 V34.0 (QQ联动版) 已加载！")
         asyncio.create_task(self.start_web_server())
 
-    # ================= QQ 指令 =================
+    # ================= QQ 专属指令 =================
+    
+    # 1. 查专注
+    @filter.command("查专注")
+    async def qq_check_focus(self, event: AstrMessageEvent):
+        today = datetime.now(tz=TZ).strftime("%Y-%m-%d")
+        try:
+            with sqlite3.connect(STUDY_DB_FILE, check_same_thread=False) as conn:
+                cursor = conn.execute("SELECT subject, SUM(minutes) FROM focus_records WHERE date=? GROUP BY subject", (today,))
+                rows = cursor.fetchall()
+                
+                if not rows:
+                    yield event.plain_result("📊 今天还没有专注记录哦，快去刷番茄钟吧！")
+                    return
+                
+                total = sum(r[1] for r in rows)
+                msg = f"📊 **今日专注账本** ({today})\n━━━━━━━━━━━━━━━━\n"
+                for sub, mins in rows:
+                    msg += f"📖 {sub}：{mins} 分钟\n"
+                msg += f"━━━━━━━━━━━━━━━━\n"
+                msg += f"⏱️ 总计：{total} 分钟 ({round(total/60, 1)} 小时)"
+                yield event.plain_result(msg)
+        except Exception as e:
+            logger.error(f"查专注失败: {e}")
+            yield event.plain_result("❌ 查询失败，请查看后台日志。")
+
+    # 2. 设key
     @filter.command("设key")
     async def qq_set_key(self, event: AstrMessageEvent):
         parts = event.message_str.split(maxsplit=1)
@@ -79,8 +105,9 @@ class EinkApiPlugin(Star):
                 conn.commit()
             yield event.plain_result(f"✅ DeepSeek Key 已安全保存！")
         except Exception as e:
-            logger.error(f"保存Key失败: {e}")
+            yield event.plain_result("❌ 保存失败。")
 
+    # 3. 备忘录
     @filter.command("备忘录")
     async def qq_add_memo(self, event: AstrMessageEvent):
         parts = event.message_str.split(maxsplit=1)
@@ -93,7 +120,7 @@ class EinkApiPlugin(Star):
                 conn.commit()
             yield event.plain_result(f"✅ 备忘录已存！\n内容：{msg_text}")
         except Exception as e:
-            logger.error(f"保存备忘录失败: {e}")
+            yield event.plain_result("❌ 保存失败。")
 
     @filter.command("清屏")
     async def qq_clear_memo(self, event: AstrMessageEvent):
@@ -103,7 +130,7 @@ class EinkApiPlugin(Star):
                 conn.commit()
             yield event.plain_result("✅ 备忘录已全部清空。")
         except Exception as e:
-            logger.error(f"清空备忘录失败: {e}")
+            yield event.plain_result("❌ 清空失败。")
 
     # ================= 核心逻辑 =================
     async def handle_record(self, request):
@@ -184,7 +211,7 @@ class EinkApiPlugin(Star):
                     result_data["memos"].append({"content": row[0], "time": row[1]})
         except: pass
 
-        # 2. 查天气 (带缓存)
+        # 2. 查天气
         try:
             now_time = datetime.now(tz=TZ)
             if self._weather_cache is None or (now_time - self._weather_cache_time) > timedelta(minutes=10):
@@ -243,7 +270,7 @@ class EinkApiPlugin(Star):
                 result_data["server_status"]["disk"] = psutil.disk_usage('/').percent
             except: pass
 
-        # 7. 查 DSH (带缓存)
+        # 7. 查 DSH
         try:
             now_time = datetime.now(tz=TZ)
             if self._ds_cache_time is None or (now_time - self._ds_cache_time) > timedelta(hours=1):
