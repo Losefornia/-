@@ -61,7 +61,7 @@ def _now():
 
 # ============ 插件主体 ============
 
-@register("eink_api", "你的名字", "墨水屏看板｜多考试倒计时，直接设置当前周", "35.6.0")
+@register("eink_api", "你的名字", "墨水屏看板｜多考试倒计时，直接设置当前周", "35.7.0")
 class EinkApiPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -138,9 +138,11 @@ class EinkApiPlugin(Star):
     async def initialize(self):
         self.http_client = httpx.AsyncClient(timeout=10.0)
         if psutil:
-            psutil.cpu_percent(interval=0.1)   # 预热，让首个样本有效
+            # 预热：让后续 cpu_percent(None) 有基准；同时把这次值存进窗口
+            warm = psutil.cpu_percent(interval=0.1)
+            self._cpu_samples.append(warm)
             self._sampler_task = asyncio.create_task(self._cpu_sampler())
-        logger.info("✅ 墨水屏看板 V35.6｜并行聚合 + CPU 滑动均值")
+        logger.info("✅ 墨水屏看板 V35.7｜并行聚合 + CPU 滑动均值（修复启动初期 0 值）")
         self._web_task = asyncio.create_task(self.start_web_server())
 
     async def terminate(self):
@@ -164,6 +166,8 @@ class EinkApiPlugin(Star):
     # ---------- CPU 采样器 ----------
     async def _cpu_sampler(self):
         """后台持续采样 CPU，供墨水屏读取窗口均值。"""
+        # 首轮先等一个间隔，避开预热后极短时间差导致的 0 值
+        await asyncio.sleep(CPU_SAMPLE_INTERVAL)
         while True:
             try:
                 v = await asyncio.to_thread(psutil.cpu_percent, None)
@@ -407,14 +411,21 @@ class EinkApiPlugin(Star):
         return subject_times, total
 
     def _fetch_news(self):
-        out = []
+        """取最近 2 条互不重复的新闻标题（库里有重复入库也不影响显示）。"""
+        out, seen = [], set()
         try:
             with _db(NEWS_DB_FILE) as conn:
-                for (title,) in conn.execute(
+                rows = conn.execute(
                     "SELECT title FROM news WHERE title IS NOT NULL AND title != '' "
-                    "ORDER BY id DESC LIMIT 2"
-                ).fetchall():
-                    out.append({"title": title[:22] + ".." if len(title) > 22 else title})
+                    "ORDER BY id DESC LIMIT 10"
+                ).fetchall()
+            for (title,) in rows:
+                if title in seen:
+                    continue
+                seen.add(title)
+                out.append({"title": title[:22] + ".." if len(title) > 22 else title})
+                if len(out) >= 2:
+                    break
         except Exception as e:
             logger.warning(f"新闻 {e}")
         return out
@@ -482,13 +493,16 @@ class EinkApiPlugin(Star):
         return usage_3d, hourly_avg, days_left
 
     def _fetch_server(self):
-        """CPU 用滑动均值，内存/磁盘用实时值（对墨水屏更合适）。"""
+        """CPU 用滑动均值，内存/磁盘用实时值。"""
         st = {"cpu": 0, "mem": 0, "disk": 0}
         if not psutil:
             return st
         try:
             if self._cpu_samples:
                 st["cpu"] = round(sum(self._cpu_samples) / len(self._cpu_samples))
+            else:
+                # 启动初期窗口为空：短阻塞采样一次（≤0.1s，仅早期触发）
+                st["cpu"] = round(psutil.cpu_percent(interval=0.1))
             st["mem"]  = round(psutil.virtual_memory().percent)
             st["disk"] = round(psutil.disk_usage("/").percent)
         except Exception as e:
@@ -641,6 +655,11 @@ class EinkApiPlugin(Star):
 
         self.runner = web.AppRunner(app)
         await self.runner.setup()
-        site = web.TCPSite(self.runner, "0.0.0.0", WEB_PORT)
-        await site.start()
+        try:
+            site = web.TCPSite(self.runner, "0.0.0.0", WEB_PORT)
+            await site.start()
+        except OSError as e:
+            logger.error(f"❌ 端口 {WEB_PORT} 启动失败（可能被占用）: {e}")
+            await self.runner.cleanup()
+            return
         logger.info(f"📺 墨水屏 API 已启动: http://0.0.0.0:{WEB_PORT}")
